@@ -14,6 +14,10 @@ type ImageMap = Record<string, string>;
 type ItemOverrides = Record<string, Partial<MenuItem>>;
 
 export async function getMockItemsWithImages(): Promise<MenuItem[]> {
+  if (isVercelRuntime()) {
+    return getProductionMenuItems();
+  }
+
   const imageMap = await readImageMap();
   const itemOverrides = await readItemOverrides();
   const deletedItems = await readDeletedItems();
@@ -51,10 +55,7 @@ export async function saveLocalItem(formData: FormData) {
   };
 
   if (isVercelRuntime()) {
-    await saveProductionItemOverride(id, itemOverrides[id]);
-    if (imageUrl) {
-      await saveProductionImage(id, imageUrl);
-    }
+    await saveProductionMenuItem(id, itemOverrides[id]);
     return;
   }
 
@@ -92,7 +93,7 @@ export async function saveLocalItemImage(itemId: string, file: File, fallbackUrl
   }
 
   if (isVercelRuntime()) {
-    await saveProductionImage(itemId, imageUrl);
+    await saveProductionMenuItemImage(itemId, imageUrl);
     return;
   }
 
@@ -108,7 +109,7 @@ export async function deleteLocalItem(itemId: string) {
   }
 
   if (isVercelRuntime()) {
-    await deleteProductionItem(itemId);
+    await deleteProductionMenuItem(itemId);
     return;
   }
 
@@ -173,6 +174,109 @@ async function readProductionImageMap(): Promise<ImageMap> {
   return Object.fromEntries((data || []).map((row) => [row.item_id as string, row.image_url as string]));
 }
 
+async function getProductionMenuItems(): Promise<MenuItem[]> {
+  if (!hasProductionStorage()) {
+    throw new Error("Production menu storage is not configured. Add Supabase env vars and run schema.sql.");
+  }
+
+  const supabase = getProductionStorageClient();
+  const { data, error } = await supabase
+    .from("roma_menu_items")
+    .select("item_data,is_deleted,sort_order")
+    .order("sort_order", { ascending: true });
+
+  if (error) throw new Error(error.message);
+
+  const rows = data || [];
+  const missingItems = mockItems.filter((item) => !rows.some((row) => (row.item_data as MenuItem).id === item.id));
+  if (missingItems.length) {
+    await seedProductionMenuItems(missingItems);
+    return getProductionMenuItems();
+  }
+
+  return rows
+    .filter((row) => !row.is_deleted)
+    .map((row) => row.item_data as MenuItem);
+}
+
+async function seedProductionMenuItems(itemsToSeed: MenuItem[]) {
+  const supabase = getProductionStorageClient();
+  const seedItems = await getSeedMenuItems(itemsToSeed);
+  const { error } = await supabase.from("roma_menu_items").upsert(
+    seedItems.map((item) => ({
+      item_id: item.id,
+      item_data: item,
+      is_deleted: false,
+      sort_order: mockItems.findIndex((mockItem) => mockItem.id === item.id),
+      updated_at: new Date().toISOString(),
+    })),
+  );
+
+  if (error) throw new Error(error.message);
+}
+
+async function getSeedMenuItems(itemsToSeed: MenuItem[]) {
+  const [imageMap, itemOverrides] = await Promise.all([
+    readBundledJson<ImageMap>(imageMapPath, {}),
+    readBundledJson<ItemOverrides>(itemOverridesPath, {}),
+  ]);
+
+  return itemsToSeed.map((item) => ({
+    ...item,
+    ...itemOverrides[item.id],
+    image_url: imageMap[item.id] || itemOverrides[item.id]?.image_url || item.image_url,
+  }));
+}
+
+async function readBundledJson<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function saveProductionMenuItem(itemId: string, itemData: Partial<MenuItem>) {
+  const items = await getProductionMenuItems();
+  const existing = items.find((item) => item.id === itemId) || mockItems.find((item) => item.id === itemId);
+  if (!existing) return;
+
+  const updatedItem = { ...existing, ...itemData };
+  const supabase = getProductionStorageClient();
+  const { error } = await supabase.from("roma_menu_items").upsert({
+    item_id: itemId,
+    item_data: updatedItem,
+    is_deleted: false,
+    sort_order: mockItems.findIndex((item) => item.id === itemId),
+    updated_at: new Date().toISOString(),
+  });
+
+  if (error) throw new Error(error.message);
+}
+
+async function saveProductionMenuItemImage(itemId: string, imageUrl: string) {
+  const items = await getProductionMenuItems();
+  const existing = items.find((item) => item.id === itemId) || mockItems.find((item) => item.id === itemId);
+  if (!existing) return;
+
+  await saveProductionMenuItem(itemId, { ...existing, image_url: imageUrl });
+}
+
+async function deleteProductionMenuItem(itemId: string) {
+  const items = await getProductionMenuItems();
+  const existing = items.find((item) => item.id === itemId) || mockItems.find((item) => item.id === itemId);
+  const supabase = getProductionStorageClient();
+  const { error } = await supabase.from("roma_menu_items").upsert({
+    item_id: itemId,
+    item_data: existing || { id: itemId },
+    is_deleted: true,
+    sort_order: mockItems.findIndex((item) => item.id === itemId),
+    updated_at: new Date().toISOString(),
+  });
+
+  if (error) throw new Error(error.message);
+}
+
 async function readProductionItemOverrides(): Promise<ItemOverrides> {
   if (!hasProductionStorage()) return {};
   const supabase = getProductionStorageClient();
@@ -187,36 +291,6 @@ async function readProductionDeletedItems(): Promise<string[]> {
   const { data, error } = await supabase.from("roma_deleted_items").select("item_id");
   if (error) throw new Error(error.message);
   return (data || []).map((row) => row.item_id as string);
-}
-
-async function saveProductionItemOverride(itemId: string, itemData: Partial<MenuItem>) {
-  const supabase = getProductionStorageClient();
-  const { error } = await supabase.from("roma_item_overrides").upsert({
-    item_id: itemId,
-    item_data: itemData,
-    updated_at: new Date().toISOString(),
-  });
-  if (error) throw new Error(error.message);
-}
-
-async function saveProductionImage(itemId: string, imageUrl: string) {
-  const supabase = getProductionStorageClient();
-  const { error } = await supabase.from("roma_item_images").upsert({
-    item_id: itemId,
-    image_url: imageUrl,
-    updated_at: new Date().toISOString(),
-  });
-  if (error) throw new Error(error.message);
-}
-
-async function deleteProductionItem(itemId: string) {
-  const supabase = getProductionStorageClient();
-  const { error } = await supabase.from("roma_deleted_items").upsert({
-    item_id: itemId,
-    deleted_at: new Date().toISOString(),
-  });
-  if (error) throw new Error(error.message);
-  await supabase.from("roma_item_overrides").delete().eq("item_id", itemId);
 }
 
 function getSafeExtension(filename: string, mimeType: string) {

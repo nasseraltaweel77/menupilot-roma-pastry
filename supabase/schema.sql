@@ -79,6 +79,14 @@ create table if not exists public.roma_deleted_items (
   deleted_at timestamptz not null default now()
 );
 
+create table if not exists public.roma_menu_items (
+  item_id text primary key,
+  item_data jsonb not null,
+  is_deleted boolean not null default false,
+  sort_order int not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 create index menu_categories_restaurant_id_idx on public.menu_categories(restaurant_id);
 create index menu_items_restaurant_id_idx on public.menu_items(restaurant_id);
 create index menu_items_category_id_idx on public.menu_items(category_id);
@@ -95,6 +103,7 @@ alter table public.roma_pending_payments enable row level security;
 alter table public.roma_item_overrides enable row level security;
 alter table public.roma_item_images enable row level security;
 alter table public.roma_deleted_items enable row level security;
+alter table public.roma_menu_items enable row level security;
 
 create policy "Owners can manage restaurants"
 on public.restaurants

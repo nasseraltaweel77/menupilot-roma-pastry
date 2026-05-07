@@ -28,14 +28,24 @@ export function getMoyasarSecretKey() {
   return process.env.MOYASAR_SECRET_KEY || "";
 }
 
+function getValidatedMoyasarSecretKey() {
+  const secretKey = getMoyasarSecretKey();
+  if (!secretKey) {
+    throw new Error("MOYASAR_SECRET_KEY is missing in environment variables.");
+  }
+
+  if (!secretKey.startsWith("sk_")) {
+    throw new Error("MOYASAR_SECRET_KEY must be a Moyasar secret key that starts with sk_.");
+  }
+
+  return secretKey;
+}
+
 export async function createMoyasarInvoice(input: {
   order: PendingPaymentOrder;
   origin: string;
 }) {
-  const secretKey = getMoyasarSecretKey();
-  if (!secretKey) {
-    throw new Error("Moyasar is not configured.");
-  }
+  const secretKey = getValidatedMoyasarSecretKey();
 
   const response = await fetch(`${moyasarApiBase}/invoices`, {
     method: "POST",
@@ -59,19 +69,17 @@ export async function createMoyasarInvoice(input: {
   });
 
   if (!response.ok) {
-    throw new Error("Unable to create Moyasar payment session.");
+    const details = await response.text();
+    throw new Error(`Unable to create Moyasar payment session. Moyasar responded ${response.status}: ${details}`);
   }
 
   return await response.json() as MoyasarInvoice;
 }
 
 export async function fetchMoyasarInvoice(invoiceId: string) {
-  const secretKey = getMoyasarSecretKey();
-  if (!secretKey) {
-    throw new Error("Moyasar is not configured.");
-  }
+  const secretKey = getValidatedMoyasarSecretKey();
 
-  const response = await fetch(`${moyasarApiBase}/invoices?id=${encodeURIComponent(invoiceId)}`, {
+  const response = await fetch(`${moyasarApiBase}/invoices/${encodeURIComponent(invoiceId)}`, {
     headers: {
       Authorization: `Basic ${Buffer.from(`${secretKey}:`).toString("base64")}`,
     },
@@ -82,8 +90,7 @@ export async function fetchMoyasarInvoice(invoiceId: string) {
     throw new Error("Unable to verify Moyasar payment.");
   }
 
-  const data = await response.json() as { invoices?: MoyasarInvoice[] };
-  return data.invoices?.[0] || null;
+  return await response.json() as MoyasarInvoice;
 }
 
 export async function savePaidOrder(order: PendingPaymentOrder, invoiceId: string) {
